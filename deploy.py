@@ -5,7 +5,50 @@ import torch.nn.functional as F
 import numpy as np
 import os
 
+import smtplib
+import threading
+from email.message import EmailMessage
+
 app = Flask(__name__)
+
+
+def send_alert_email(subject: str, body: str, to_address: str = None):
+    """
+    Send an email using SMTP. Credentials and defaults are read from env vars:
+    SMTP_HOST, SMTP_PORT (int), SMTP_USER, SMTP_PASS, ALERT_FROM, ALERT_TO.
+    """
+    host = os.environ.get('SMTP_HOST')
+    port = int(os.environ.get('SMTP_PORT', 587))
+    user = os.environ.get('SMTP_USER')
+    password = os.environ.get('SMTP_PASS')
+    sender = os.environ.get('ALERT_FROM', user)
+    receiver = to_address or os.environ.get('ALERT_TO')
+
+    if not (host and user and password and receiver):
+        # Missing config — log and return silently
+        print("Email not sent: SMTP config or receiver missing.")
+        return
+
+    msg = EmailMessage()
+    msg['From'] = sender
+    msg['To'] = receiver
+    msg['Subject'] = subject
+    msg.set_content(body)
+
+    try:
+        with smtplib.SMTP(host, port, timeout=10) as smtp:
+            smtp.ehlo()
+            if port == 587:
+                smtp.starttls()
+                smtp.ehlo()
+            smtp.login(user, password)
+            smtp.send_message(msg)
+        print(f"Alert email sent to {receiver}")
+    except Exception as e:
+        print(f"Failed to send alert email: {e}")
+
+
+
 
 # Define the model architecture (same as in your training script)
 class ComplexCNN1D(nn.Module):
@@ -112,6 +155,17 @@ def predict():
         
         prediction = output.item()
         label = "Fall" if prediction >= 0.5 else "No Fall"
+
+
+        # If fall detected, send email in background thread to avoid blocking request
+        if label == "Fall":
+            subject = "ALERT: Fall detected"
+            body = f"Fall detected by model. Confidence={prediction:.4f}\n\nInput metadata: {data.get('meta', {})}"
+            # optional override recipient via JSON: data.get('alert_to')
+            recipient = data.get('alert_to')
+            threading.Thread(target=send_alert_email, args=(subject, body, recipient), daemon=True).start()
+        
+
         
         return jsonify({
             'prediction': float(prediction),
@@ -127,7 +181,7 @@ def health():
 
 if __name__ == '__main__':
     #app.run(host='localhost', port=5000, debug=True)
-    
+
     # Use PORT env var provided by Render (fallback to 5000 locally)
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
